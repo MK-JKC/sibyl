@@ -324,7 +324,21 @@ def verify_export(
     keys: Sequence[PublicKey],
     *,
     anchors: Sequence[Mapping[str, Any]] | None = None,
+    expected_to_seq: int | None = None,
+    expected_head_hash: str | None = None,
 ) -> Report:
+    if expected_to_seq is not None and (
+        not isinstance(expected_to_seq, int)
+        or isinstance(expected_to_seq, bool)
+        or expected_to_seq < 0
+    ):
+        raise InputError("expected_to_seq must be a non-negative integer")
+    if expected_head_hash is not None and (
+        not isinstance(expected_head_hash, str)
+        or len(expected_head_hash) != 64
+        or any(c not in "0123456789abcdefABCDEF" for c in expected_head_hash)
+    ):
+        raise InputError("expected_head_hash must be a 64-digit hexadecimal SHA-256")
     header = next((ln for ln in lines if ln.get("type") == "header"), None)
     if header is not None and header.get("format") != EXPORT_FORMAT:
         raise InputError(f"unsupported export format {header.get('format')!r}")
@@ -336,9 +350,48 @@ def verify_export(
     report.from_seq = events[0].get("seq") if isinstance(events[0].get("seq"), int) else None
     chosen = list(anchors) if anchors else [ln for ln in lines if ln.get("type") == "anchor"]
     try:
+        # A valid earlier anchor must not make an incomplete export appear complete.
+        # This checks consistency with the declared range, not completeness against
+        # the server: independent latest-anchor pinning is still required.
+        if header is not None:
+            for field, observed in (
+                ("from_seq", events[0].get("seq")),
+                ("to_seq", events[-1].get("seq")),
+            ):
+                declared = header.get(field)
+                if (
+                    not isinstance(declared, int)
+                    or isinstance(declared, bool)
+                    or declared != observed
+                ):
+                    raise _Break(
+                        (
+                            observed
+                            if isinstance(observed, int) and not isinstance(observed, bool)
+                            else None
+                        ),
+                        GAP,
+                        f"export header {field} does not match included events",
+                    )
         hashes = _check_rows(events, tenant)
         report.rows = len(hashes)
         report.to_seq = max(hashes)
+        # Unlike the export's own header, these expectations are supplied by the
+        # auditor from a separately trusted source (e.g. pinned latest anchor).
+        if expected_to_seq is not None and report.to_seq != expected_to_seq:
+            raise _Break(
+                expected_to_seq,
+                GAP,
+                "export does not reach the independently expected terminal sequence",
+            )
+        if expected_head_hash is not None and (
+            hashes[report.to_seq].hex() != expected_head_hash.lower()
+        ):
+            raise _Break(
+                report.to_seq,
+                ANCHOR_MISMATCH,
+                "export head differs from the independently expected terminal hash",
+            )
         if not chosen:
             raise _Break(None, NO_ANCHOR, "no anchor was given or found in the export")
         highest = _check_anchors(chosen, keys, hashes, tenant, report)
@@ -359,7 +412,12 @@ def verify_export(
 
 
 def verify_files(
-    export_path: Path, key_paths: Sequence[Path], anchor_paths: Sequence[Path] = ()
+    export_path: Path,
+    key_paths: Sequence[Path],
+    anchor_paths: Sequence[Path] = (),
+    *,
+    expected_to_seq: int | None = None,
+    expected_head_hash: str | None = None,
 ) -> Report:
     try:
         lines = parse_lines(export_path.read_text("utf-8"))
@@ -369,7 +427,13 @@ def verify_files(
         raise InputError(str(exc)) from exc
     if not keys:
         raise InputError("at least one --public-key is required")
-    return verify_export(lines, keys, anchors=anchors or None)
+    return verify_export(
+        lines,
+        keys,
+        anchors=anchors or None,
+        expected_to_seq=expected_to_seq,
+        expected_head_hash=expected_head_hash,
+    )
 
 
 def render(report: Report) -> str:

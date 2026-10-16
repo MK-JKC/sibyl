@@ -45,6 +45,15 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         help="anchor JSON (object, list, {data: [...]} or JSONL); default: the export's own",
     )
+    verify.add_argument(
+        "--expected-to-seq",
+        type=int,
+        help="terminal sequence obtained independently of the export",
+    )
+    verify.add_argument(
+        "--expected-head-hash",
+        help="64-hex-character terminal digest independently pinned by the auditor",
+    )
     verify.add_argument("--quiet", action="store_true", help="no summary on stderr")
     return parser
 
@@ -53,7 +62,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.group == "audit" and args.verb == "verify":
         try:
-            report = audit.verify_files(args.export, args.public_keys, args.anchors)
+            report = audit.verify_files(
+                args.export,
+                args.public_keys,
+                args.anchors,
+                expected_to_seq=args.expected_to_seq,
+                expected_head_hash=args.expected_head_hash,
+            )
         except audit.InputError as exc:
             sys.stderr.write(f"sibyl audit verify: cannot verify: {exc}\n")
             return EXIT_INPUT
